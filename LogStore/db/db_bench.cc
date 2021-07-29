@@ -13,6 +13,7 @@
 #include <time.h>
 #include <dirent.h>
 #include <algorithm>
+#include <unordered_map>
 #include "db/db_impl.h"
 #include "db/version_set.h"
 #include "leveldb/cache.h"
@@ -137,6 +138,23 @@ static bool FLAGS_use_statistics = true;
 // write percentage is what's left over
 static double FLAGS_read_pct = 0.9;
 
+/* Use other traces 
+   YCSB : Path without the final file name ex) trace/1GB/1GB
+   Review : Path with the final file name ex) review_trace/review-82M-v2.csv
+ */
+static std::string FLAGS_ycsb = "";
+static std::string FLAGS_review = "";
+static std::string FLAGS_facebook = "";
+
+// Used for YCSB/Review
+struct Operation {
+  char operation_type;
+  uint64_t key;
+  uint64_t length;
+};
+std::vector<Operation> trace;
+static std::unordered_map<std::string, leveldb::HistogramImpl> histogram_;
+
 namespace leveldb {
 
 namespace {
@@ -204,6 +222,7 @@ class Stats {
   int next_report_;
   int64_t bytes_;
   double last_op_finish_;
+  double last_op_micros_;
   double last_report_finish_;
   int last_div_;
   HistogramImpl hist_;
@@ -246,6 +265,10 @@ class Stats {
 
   void AddMessage(Slice msg) {
     AppendWithSpace(&message_, msg);
+  }
+
+  const double LastOperationMicros() {
+    return last_op_micros_;
   }
 
   void SetId(int id) { id_ = id; }
@@ -545,9 +568,86 @@ class Benchmark {
     delete filter_policy_;
   }
 
+  void LoadTrace(const std::string& trace_name) {
+    FILE* trace_file = fopen(trace_name.c_str(), "r");
+    if (trace_file == NULL) {
+      fprintf(stderr, "[Error] Failed opening trace file %s\n", trace_name.c_str());
+      exit(1);
+    }
+
+    // Preparing trace
+    size_t bufsize = 100;
+    char* buf = new char[100];
+
+    if (FLAGS_ycsb != "") {
+      // Read the number of operations
+      uint64_t count;
+      int status = getline(&buf, &bufsize, trace_file);
+      assert(status > 1);
+      sscanf(buf, "%lu\n", &count);
+
+      trace.clear();
+      trace.reserve(count);
+
+      for (uint64_t i = 0; i < count; i++) {
+        Operation operation;
+        char type[5];
+        char raw_key[23];  
+
+	status = getline(&buf, &bufsize, trace_file);
+	assert(status > 1);
+	sscanf(buf, "%s %*s %s %lu\n", type, raw_key, &operation.length);
+
+	operation.operation_type = type[0];
+	char* key_ptr = strtok(raw_key, "user");
+
+	char* stop;
+	operation.key = strtoul(key_ptr, &stop, 10);
+
+	trace.emplace_back(operation);
+      }
+    }
+    else if (FLAGS_review != "" | FLAGS_facebook != "") {
+      int count = 0;
+      while (fgets(buf, bufsize, trace_file)) {
+        count++;
+      }
+
+      trace.clear();
+      trace.reserve(count);
+
+      rewind(trace_file);
+      for (uint64_t i = 0; i < count; i++){
+        Operation operation;
+
+	int status = getline(&buf, &bufsize, trace_file);
+	assert(status > 1);
+	sscanf(buf, "%lu\n", &operation.key);
+
+	trace.emplace_back(operation);
+      }
+    }
+
+    delete[] buf;
+    fclose(trace_file);
+
+    // Clearing performance counters
+    for (auto& operations : histogram_) {
+      operations.second.Clear();
+    }
+  }
+
   void Run() {
     PrintHeader();
     Open();
+
+    // Initialize performnace counter
+    if (FLAGS_ycsb != "" || FLAGS_review != "" || FLAGS_facebook != "") {
+      histogram_.insert({"insert", HistogramImpl()});		    
+      histogram_.insert({"read", HistogramImpl()});		    
+      histogram_.insert({"update", HistogramImpl()});		    
+      histogram_.insert({"scan", HistogramImpl()});		    
+    }
 
     const char* benchmarks = FLAGS_benchmarks;
     while (benchmarks != NULL) {
@@ -660,6 +760,60 @@ class Benchmark {
         method = &Benchmark::SnappyUncompress;
       } else if (name == Slice("heapprofile")) {
         HeapProfile();
+      } else if (name == Slice("load")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_load.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloada")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_runa.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloadb")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_runb.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloadc")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_runc.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloadd")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_rund.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloade")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_rune.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("workloadf")) {
+	std::string trace_name = FLAGS_ycsb + "/trace_runf.csv";
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("customfill")) {
+        std::string trace_name;
+	if (FLAGS_review != "") {
+	  trace_name = FLAGS_review;
+	} else if (FLAGS_facebook != "") {
+	  trace_name =FLAGS_facebook;
+	} else {
+	  fprintf(stderr, "[Error] Stopped with a wrong workload name.\n");
+	  exit(1);
+	}
+
+	LoadTrace(trace_name);
+	method = &Benchmark::RunTrace;
+      } else if (name == Slice("customread")) {
+        std::string trace_name;
+	if (FLAGS_review != "") {
+	  trace_name = FLAGS_review;
+	} else if (FLAGS_facebook != "") {
+	  trace_name =FLAGS_facebook;
+	} else {
+	  fprintf(stderr, "[Error] Stopped with a wrong workload name.\n");
+	  exit(1);
+	}
+       
+        LoadTrace(trace_name);
+        method = &Benchmark::RunGetTrace;	
       } else if (name == Slice("stats")) {
         PrintStats("leveldb.stats");
         if (statistics_.get() != nullptr) {
@@ -1688,6 +1842,90 @@ class Benchmark {
       Env::Default()->DeleteFile(fname);
     }
   }
+
+  void RunGetTrace(ThreadState* thread) {
+   RandomGenerator gen;
+   ReadOptions read_operations;
+
+   //Read data
+   for (const auto& operation : trace) { 
+     Status s;
+     char key[100];
+     snprintf(key, sizeof(key), "%020lu", operation.key);
+     
+     std::string value;
+     s = db_->Get(read_operations, key, &value);
+     thread->stats.FinishedSingleOp(db_);
+     histogram_.at("read").Add(thread->stats.LastOperationMicros());
+
+     if (!s.ok()) {
+       fprintf(stderr, "[Error] %s during reading %s\n", s.ToString().c_str(), key);
+       exit(1);
+     }
+   }
+  }
+ 
+  void RunTrace(ThreadState* thread) {
+    RandomGenerator gen;
+    ReadOptions read_operations;
+
+    int cnt = 0;
+    if (FLAGS_ycsb != "") {
+      for (const auto& operation : trace) {
+        Status s;
+	char key[100];
+	snprintf(key, sizeof(key), "%020lu", operation.key);
+	if (operation.operation_type == 'I') {
+	  s = db_->Put(write_options_, key, gen.Generate(value_size_));
+	  thread->stats.FinishedSingleOp(db_);
+	  histogram_.at("insert").Add(thread->stats.LastOperationMicros());
+	} else if (operation.operation_type == 'R') {
+	  std::string value;
+	  s = db_->Get(read_operations, key, &value);
+	  thread->stats.FinishedSingleOp(db_);
+	  histogram_.at("read").Add(thread->stats.LastOperationMicros());
+	} else if (operation.operation_type == 'U') {
+	  s = db_->Put(write_options_, key, gen.Generate(value_size_));
+	  histogram_.at("update").Add(thread->stats.LastOperationMicros());
+	} else if (operation.operation_type == 'S') {
+	  int i = 0;
+	  Iterator* it = db_->NewIterator(read_operations);
+
+	  for (it->Seek(key); it->Valid() && i < operation.length; it->Next()) {
+	    uint64_t size = it->key().ToString().size() + it->value().ToString().size();
+	    i++;
+	    thread->stats.FinishedSingleOp(db_);
+	    histogram_.at("scan").Add(thread->stats.LastOperationMicros());
+	  }
+
+	  delete it;
+	} else {
+	  fprintf(stderr, "[Error] Unknown operations %c\n", operation.operation_type);
+	}
+
+	if (!s.ok()) {
+	  fprintf(stderr, "[Error] %s\n", s.ToString().c_str());
+	  exit(1);
+	}
+      }
+    } else if (FLAGS_review != "" | FLAGS_facebook != "") {
+      // Insert data
+      int op = 0;
+      for (const auto& operation : trace) {
+       Status s;
+       char key[100];
+       snprintf(key, sizeof(key), "%020lu", operation.key);
+       s = db_->Put(write_options_, key, gen.Generate(value_size_));
+       thread->stats.FinishedSingleOp(db_);
+       histogram_.at("insert").Add(thread->stats.LastOperationMicros());
+
+       if (!s.ok()) {
+         fprintf(stderr, "[Error] %s\n", s.ToString().c_str());
+	 exit(1);
+       }
+      } 
+    }
+  }
 };
 
 }  // namespace leveldb
@@ -1747,6 +1985,12 @@ int main(int argc, char** argv) {
       FLAGS_use_statistics = n;
     } else if (sscanf(argv[i], "--read_pct=%lf%c", &d, &junk) == 1) {
       FLAGS_read_pct = d;
+    } else if (strncmp(argv[i], "--ycsb=", 7) == 0) {
+      FLAGS_ycsb = argv[i] + 7;      
+    } else if (strncmp(argv[i], "--review=", 9) == 0) {
+      FLAGS_review = argv[i] + 9;
+    } else if (strncmp(argv[i], "--facebook=", 11) == 0) {
+      FLAGS_facebook = argv[i] + 11;
     } else {
       fprintf(stderr, "Invalid flag '%s'\n", argv[i]);
       exit(1);
